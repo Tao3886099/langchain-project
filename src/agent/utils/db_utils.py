@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional
 
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -55,24 +55,104 @@ class MySQLDataBaseManager:
             log.exception(e)
             raise ValueError(f"获取表注释时发生错误: {str(e)}")
 
-    def get_table_schema(self, table_name: str) -> List[dict]:
-        """获取指定表的字段信息，包括字段名称、数据类型、是否可为空等
+    def get_table_schema(self, table_names: Optional[List[str]] = None) -> str:
+        """获取指定表的模式信息（主键，外键，注释信息等）
 
         Args:
-            table_name: 表名
+            table_name: 表名，如果为 None 则获取所有表的字段信息
 
         Returns:
             包含字段信息的字典列表，每个字典包含 'column_name', 'data_type', 'is_nullable' 等键
         """
         try:
             inspector = inspect(self.engine)
-            columns = inspector.get_columns(table_name)
-            return columns
+            if table_names is None:
+                table_names = inspector.get_table_names()
+
+            schema_info = []
+            for table_name in table_names:
+                columns = inspector.get_columns(table_name)
+                pk_constraint = inspector.get_pk_constraint(table_name)
+                primary_keys = inspector.get_pk_constraint(table_name).get('constrained_columns', [])
+                foreign_keys = inspector.get_foreign_keys(table_name)
+                indexes = inspector.get_indexes(table_name)
+
+                # 构建表模式信息
+                table_schema = f"表名: {table_name}\n"
+                table_schema += "列信息:\n"
+                for column in columns:
+                    # 检查该列是否在主键约束中
+                    pk_indicator = " (主键)" if column['name'] in primary_keys else ""
+                    # 获取字段注释，如果不存在则显示‘无注释’
+                    column_comment = column.get('comment', '无注释')
+                    table_schema += f"  - {column['name']} ({column['type']}){pk_indicator})[注释: {column_comment}]\n"
+                if foreign_keys:
+                    table_schema += "外键约束:\n"
+                    for fk in foreign_keys:
+                        table_schema += f"  - 列: {fk['constrained_columns']} -> 参照表: {fk['referred_table']}({fk['referred_columns']})\n"
+                if indexes:
+                    table_schema += "索引信息:\n"
+                    for index in indexes:
+                        unique_indicator = " (唯一索引)" if index.get('unique', False) else ""
+                        table_schema += f"  - 索引名: {index['name']} 列: {index['column_names']}{unique_indicator}\n"
+                schema_info.append(table_schema)
+            return "\n".join(schema_info) if schema_info else "未找到表的模式信息。"
+
         except SQLAlchemyError as e:
             log.exception(e)
-            raise ValueError(f"获取表结构时发生错误: {str(e)}")
+            raise ValueError(f"获取表模式信息时发生错误: {str(e)}")
 
 
+
+    def execute_query(self, query: str) -> str:
+        """执行SQL查询语句并返回结果
+
+        Args:
+            query: 要执行的SQL查询语句
+
+        Returns:
+            查询结果的字符串表示
+        """
+
+        # 安全检查：防止数据修改操作
+        forbidden_statements = ['INSERT', 'UPDATE', 'DELETE', 'DROP', 'ALTER', 'CREATE']
+        if any(statement in query.upper() for statement in forbidden_statements):
+            raise ValueError("出于安全考虑，禁止执行数据修改操作的SQL语句。")
+        try:
+            with self.engine.connect() as connection:
+                result = connection.execute(text(query))
+                rows = result.fetchall()
+                # 将结果转换为字符串表示
+                result_str = "\n".join([str(row) for row in rows])
+                return result_str
+        except SQLAlchemyError as e:
+            log.exception(e)
+            raise ValueError(f"执行查询时发生错误: {str(e)}")
+
+    def validate_query(self, query: str) -> bool:
+        """验证SQL查询语句的合法性
+
+        Args:
+            query: 要验证的SQL查询语句
+
+        Returns:
+            如果查询语句合法则返回 True，否则返回 False
+        """
+        # 基本语法检查
+        if not query or not query.strip():
+            return False
+        # 仅允许 SELECT或 WITH 语句
+        if not query.strip().lower().startswith(("select", "with")):
+            return False
+
+        #尝试解析查询语句（不实际执行）
+        try:
+            with self.engine.connect() as connection:
+                connection.execute(text(f"EXPLAIN {query}"))
+            return True
+        except SQLAlchemyError as e:
+            log.exception(e)
+            return False
 
 if __name__ == "__main__":
     # 示例用法
@@ -87,11 +167,20 @@ if __name__ == "__main__":
     }
     connection = f"mysql+pymysql://{DB_CONFIG['user']}:{DB_CONFIG['password']}@{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['database']}?charset=utf8mb4"
     db_manager = MySQLDataBaseManager(connection)
-    table_names = db_manager.get_table_names()
-    print(table_names)
+    # table_names = db_manager.get_table_names()
+    # print(table_names)
+    #
+    # table_comments = db_manager.get_table_comments()
+    # print(table_comments)
 
-    table_comments = db_manager.get_table_comments()
-    print(table_comments)
-
-    table_colums = db_manager.get_table_schema("sys_user")
+    table_colums = db_manager.get_table_schema(["sys_user","sys_role"])
     print(table_colums)
+
+    # table_query = "SELECT * FROM sys_user LIMIT 5;"
+    # query_result = db_manager.execute_query(table_query)
+    # print(query_result)
+    #
+    # valid_query = "SELECT * FROM sys_user;"
+    # invalid_query = "DROP TABLE sys_user;"
+    # print(db_manager.validate_query(valid_query))  # 应该返回 True
+    # print(db_manager.validate_query(invalid_query))  # 应该返回 False
